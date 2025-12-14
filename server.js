@@ -3,49 +3,46 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const compression = require('compression');
-const rateLimit = require('express-rate-limit');
 const dotenv = require('dotenv');
 const mongoose = require('mongoose');
 const http = require('http');
 const socketIo = require('socket.io');
 const path = require('path');
 
-// Load environment variables BEFORE importing any routes
+// Load environment variables
 console.log('=== Loading environment variables ===');
 console.log('Current working directory:', process.cwd());
 console.log('__dirname:', __dirname);
 
-dotenv.config();
-console.log('After dotenv.config():', process.env.STRIPE_SECRET_KEY ? 'Loaded' : 'Not loaded');
-
-// Ensure environment variables are loaded from server directory
-const envPath = path.join(__dirname, '.env');
-console.log('Loading from explicit path:', envPath);
-const result = dotenv.config({ path: envPath });
-console.log('Explicit config result:', result.parsed ? 'Success' : 'Failed');
-console.log('After explicit config:', process.env.STRIPE_SECRET_KEY ? 'Loaded' : 'Not loaded');
-
-// Load production environment variables if in production mode
-if (process.env.NODE_ENV === 'production') {
-  const prodEnvPath = path.join(__dirname, '.env.production');
-  console.log('Loading production config from:', prodEnvPath);
-  dotenv.config({ path: prodEnvPath });
-  console.log('After production config:', process.env.STRIPE_SECRET_KEY ? 'Loaded' : 'Not loaded');
+// For Vercel deployment, environment variables should be set in the dashboard
+// For local development, try to load from .env file
+if (process.env.NODE_ENV !== 'production') {
+  dotenv.config();
+} else {
+  // In production (Vercel), environment variables are provided by the platform
+  console.log('Running in production mode - using platform environment variables');
 }
 
-// Debug: Log if environment variables are loaded
-if (!process.env.STRIPE_SECRET_KEY) {
-  console.error('STRIPE_SECRET_KEY is not loaded from environment variables');
-  console.error(`Attempted to load from: ${envPath}`);
-  if (process.env.NODE_ENV === 'production') {
-    console.error(`Also attempted to load from: ${path.join(__dirname, '.env.production')}`);
-  }
-  console.error('Available STRIPE environment variables:', Object.keys(process.env).filter(k => k.includes('STRIPE')));
-  console.error('All environment variables:', Object.keys(process.env).slice(0, 20));
-  process.exit(1); // Exit if Stripe key is not loaded
-}
+// Debug: Log environment status (without exposing sensitive data)
+console.log('Environment check:', {
+  NODE_ENV: process.env.NODE_ENV,
+  MONGODB_URI: process.env.MONGODB_URI ? 'Loaded' : 'Missing',
+  STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY ? 'Loaded' : 'Missing',
+  JWT_SECRET: process.env.JWT_SECRET ? 'Loaded' : 'Missing',
+  FIREBASE_PROJECT_ID: process.env.FIREBASE_PROJECT_ID ? 'Loaded' : 'Missing',
+  ALLOW_LOCALHOST_TESTING: process.env.ALLOW_LOCALHOST_TESTING || 'Not Set',
+  CLIENT_URL: process.env.CLIENT_URL || 'Not Set'
+});
 
-console.log('Stripe API Key loaded successfully:', process.env.STRIPE_SECRET_KEY.substring(0, 20) + '...');
+// Validate required environment variables
+const requiredEnvVars = ['MONGODB_URI', 'STRIPE_SECRET_KEY', 'JWT_SECRET'];
+const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
+
+if (missingEnvVars.length > 0 && process.env.NODE_ENV === 'production') {
+  console.error('Missing required environment variables:', missingEnvVars);
+  console.error('Please set these in your Vercel project settings');
+  // Don't exit in production, let the app handle missing vars gracefully
+}
 
 // Import routes
 const authRoutes = require('./routes/auth');
@@ -84,9 +81,8 @@ const io = socketIo(server, {
 // Connect to MongoDB
 connectDB();
 
-// Trust proxy for rate limiting and secure headers
+// Trust proxy for secure headers and IP detection
 app.set('trust proxy', 1);
-
 
 // Security middleware
 app.use(helmet({
@@ -103,21 +99,6 @@ app.use(helmet({
   },
 }));
 
-// Rate limiting - only apply in production
-if (process.env.NODE_ENV === 'production') {
-  const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100, // Limit each IP to 100 requests per window
-    message: 'Too many requests from this IP, please try again later.',
-    standardHeaders: true,
-    legacyHeaders: false,
-    // Ensure CORS headers are included in rate limit responses
-    headers: true,
-  });
-
-  app.use(limiter);
-}
-
 // CORS configuration
 const corsOptions = {
   origin: function (origin, callback) {
@@ -127,12 +108,24 @@ const corsOptions = {
     if (process.env.NODE_ENV === 'production') {
       // Production: Strict origin validation
       allowedOrigins = [
-        process.env.CLIENT_URL || 'https://ticketbari-client.vercel.app',
-        'https://ticketbari-client.vercel.app',
-        'https://ticketbari.netlify.app',
+        process.env.CLIENT_URL || 'https://ticketbari-b06fa.web.app', // Firebase hosting URL
+        'https://ticketbari-client.vercel.app', // Vercel client URL
+        'https://ticketbari.netlify.app', // Netlify client URL
         'https://www.ticketbari.com',
         'https://ticketbari.com'
       ];
+      
+      // Allow localhost for testing if ALLOW_LOCALHOST_TESTING is set
+      if (process.env.ALLOW_LOCALHOST_TESTING === 'true') {
+        allowedOrigins.push(
+          'http://localhost:3000',
+          'http://localhost:5173',
+          'https://localhost:3000',
+          'https://localhost:5173',
+          'http://127.0.0.1:3000',
+          'http://127.0.0.1:5173'
+        );
+      }
     } else {
       // Development: More permissive for local development
       allowedOrigins = [
@@ -202,19 +195,21 @@ app.use((req, res, next) => {
   next();
 });
 
-// Apply CORS middleware with more permissive settings for Firebase auth routes in development
-if (process.env.NODE_ENV === 'development') {
-  const firebaseCorsOptions = {
-    origin: true, // Reflect the request origin
-    credentials: true,
-    optionsSuccessStatus: 200,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Origin', 'X-Requested-With', 'Accept', 'X-CSRF-Token'],
-    exposedHeaders: ['Set-Cookie', 'Authorization']
-  };
-  
-  app.use('/api/auth/firebase', cors(firebaseCorsOptions));
-}
+// Apply CORS middleware with permissive settings for Firebase auth routes (both dev and production)
+const firebaseCorsOptions = {
+  origin: function (origin, callback) {
+    // Allow all origins for Firebase auth routes to support development and testing
+    // This is acceptable for authentication endpoints that should be accessible from various origins
+    callback(null, true);
+  },
+  credentials: true,
+  optionsSuccessStatus: 200,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Origin', 'X-Requested-With', 'Accept', 'X-CSRF-Token'],
+  exposedHeaders: ['Set-Cookie', 'Authorization']
+};
+
+app.use('/api/auth/firebase', cors(firebaseCorsOptions));
 
 app.use(cors(corsOptions));
 
@@ -280,14 +275,9 @@ app.use('/api/vendor', authMiddleware, vendorRoutes);
 // Alias /api/tickets to /api/routes for backward compatibility
 app.use('/api/tickets', routeRoutes);
 
-// Serve static files in production
-if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, '../client/dist')));
-
-  app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, '../client/dist/index.html'));
-  });
-}
+// Static file serving removed - frontend should be deployed separately
+// If you want to serve frontend from the same server, deploy client folder along with server
+// For now, API endpoints will work without static file serving
 
 // CORS error handling middleware (before general error handler)
 app.use(corsErrorHandler);
