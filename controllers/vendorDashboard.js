@@ -455,9 +455,6 @@ const acceptBooking = asyncHandler(async (req, res) => {
   booking.vendorResponseNotes = notes || '';
   await booking.save();
   
-  // Reduce available quantity
-  route.availableQuantity -= booking.bookingQuantity;
-  await route.save();
   
   // Only log in production environment
   if (process.env.NODE_ENV === 'production') {
