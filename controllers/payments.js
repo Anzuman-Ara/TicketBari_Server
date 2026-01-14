@@ -527,7 +527,14 @@ const createCheckoutSession = asyncHandler(async (req, res) => {
     res.status(400);
     throw new Error('Booking is already paid');
   }
+  
+  // Check if there are enough available tickets
+  if (booking.route && booking.route.availableQuantity < booking.bookingQuantity) {
+    res.status(400);
+    throw new Error('Not enough available tickets for this route');
+  }
 
+  
   // Create Stripe checkout session
   try {
     const session = await stripe.checkout.sessions.create({
